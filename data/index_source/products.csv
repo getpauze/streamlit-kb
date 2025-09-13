@@ -1,0 +1,5 @@
+product_id,name,category,price,stock_quantity,description,created_date
+PROD-001,MARKUS Office Chair Vissle Dark Gray,Furniture,299.99,25,Ergonomic office chair with mesh backrest, adjustable features, and 10-year warranty. Built-in lumbar support and synchronized tilt mechanism.,2023-10-01
+PROD-002,TROTTEN Sit/Stand Desk White 63x31½,Furniture,369.99,15,Manual sit/stand desk with crank handle adjustment. Height adjustable from 27½" to 47¼". Large work surface suitable for office work and creative projects.,2023-09-15
+PROD-003,VESTERÖY Pocket Spring Mattress Twin,Furniture,249.00,40,Medium firm pocket spring mattress with 7 7/8" thickness. Independent pocket springs for individual support and minimal motion transfer.,2023-11-01
+PROD-004,FINNALA Sofa Gunnared Beige,Furniture,1249.00,8,Modular sectional sofa with soft cushions and washable cover. Pocket spring seat cushions with high-resilience foam for comfort and support.,2023-08-20
