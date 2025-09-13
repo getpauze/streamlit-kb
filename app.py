@@ -209,7 +209,7 @@ def pregenerate_index() -> bool:
 
     # 1) Gather file contents from all .txt files in index_source folder
     docs, ids, metadatas = [], [], []
-    txt_files = [f for f in os.listdir(index_source_dir) if f.endswith('.txt')]
+    txt_files = [f for f in os.listdir(index_source_dir)]
     
     if not txt_files:
         print(f"Error: No .txt files found in {index_source_dir}")
@@ -265,16 +265,15 @@ def pregenerate_index() -> bool:
 # 🛠️ Retrieval Tool (Strands) — NO Streamlit calls inside!
 # ===========================================================
 @tool
-def tool_retrieve_chunks(question: str, search_type: str = "general") -> str:
+def tool_retrieve_chunks(question: str) -> str:
     """
     Comprehensive retrieval tool for searching the knowledge base index.
     
     Args:
         question: Natural language query to search for
-        search_type: Type of search - "general" for raw chunks, "product" for formatted product info
     
     Returns:
-        Relevant information from the knowledge base, formatted based on search_type
+        Relevant information from the knowledge base with product-focused formatting
     """
     global COLLECTION, K_RETRIEVE
     if COLLECTION is None:
@@ -295,10 +294,7 @@ def tool_retrieve_chunks(question: str, search_type: str = "general") -> str:
     dists = (res.get("distances") or [[]])[0]
 
     if not docs:
-        if search_type == "product":
-            return f"[Info] No product information found for query: '{question}'"
-        else:
-            return "[No matching context]"
+        return f"[Info] No product information found for query: '{question}'"
 
     # 3) Store for UI (thread-safe) - always store for UI display
     packed = []
@@ -312,32 +308,21 @@ def tool_retrieve_chunks(question: str, search_type: str = "general") -> str:
         )
     _set_last_sources(packed)
 
-    # 4) Format output based on search type
-    if search_type == "product":
-        # Product-focused formatting
-        output_lines = []
-        output_lines.append(f"🛍️ Product Search Results for: '{question}'")
-        output_lines.append("=" * 60)
+    # 4) Product-focused formatting
+    output_lines = []
+    output_lines.append(f"🛍️ Product Search Results for: '{question}'")
+    output_lines.append("=" * 60)
+    
+    for rank, item in enumerate(packed, start=1):
+        src = item["meta"].get("source", "unknown")
+        dist = item.get("distance")
+        dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "N/A"
         
-        for rank, item in enumerate(packed, start=1):
-            src = item["meta"].get("source", "unknown")
-            dist = item.get("distance")
-            dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "N/A"
-            
-            output_lines.append(f"\n📄 Result {rank} — {src} (relevance: {dist_str})")
-            output_lines.append("-" * 40)
-            output_lines.append(item["text"])
-        
-        return "\n".join(output_lines)
-    else:
-        # General formatting for agent consumption
-        out_lines = []
-        for rank, item in enumerate(packed, start=1):
-            src = item["meta"].get("source", "unknown")
-            dist = item.get("distance")
-            dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "NA"
-            out_lines.append(f"[Source {rank} — {src} — dist:{dist_str}]\n{item['text']}")
-        return "\n\n".join(out_lines)
+        output_lines.append(f"\n📄 Result {rank} — {src} (relevance: {dist_str})")
+        output_lines.append("-" * 40)
+        output_lines.append(item["text"])
+    
+    return "\n".join(output_lines)
 
 
 # ===========================================================
@@ -618,6 +603,123 @@ def tool_inventory_check(product_id: str = None, category: str = None, low_stock
         
     except Exception as e:
         return f"[Error] Failed to check inventory: {str(e)}"
+
+
+@tool
+def tool_place_order(customer_id: str, product_id: str, quantity: int, shipping_address: str) -> str:
+    """
+    Place a new order for a customer.
+    
+    Args:
+        customer_id: Customer ID placing the order
+        product_id: Product ID to order
+        quantity: Number of units to order
+        shipping_address: Delivery address for the order
+    
+    Returns:
+        Order confirmation with details or error message
+    """
+    try:
+        # Load all required CSV files
+        orders_path = os.path.join(DATA_DIR, "oms", "orders.csv")
+        customers_path = os.path.join(DATA_DIR, "oms", "customers.csv")
+        products_path = os.path.join(DATA_DIR, "oms", "products.csv")
+        
+        if not all(os.path.exists(p) for p in [orders_path, customers_path, products_path]):
+            return "[Error] Required CSV files not found"
+        
+        # Load data
+        orders_df = pd.read_csv(orders_path)
+        customers_df = pd.read_csv(customers_path)
+        products_df = pd.read_csv(products_path)
+        
+        # Validate customer exists
+        customer = customers_df[customers_df['customer_id'] == customer_id]
+        if customer.empty:
+            available_customers = customers_df['customer_id'].tolist()[:5]
+            return f"[Error] Customer '{customer_id}' not found. Available customers: {', '.join(available_customers)}"
+        
+        customer_info = customer.iloc[0]
+        
+        # Validate product exists
+        product = products_df[products_df['product_id'] == product_id]
+        if product.empty:
+            available_products = products_df['product_id'].tolist()
+            return f"[Error] Product '{product_id}' not found. Available products: {', '.join(available_products)}"
+        
+        product_info = product.iloc[0]
+        
+        # Check stock availability
+        if product_info['stock_quantity'] < quantity:
+            return f"[Error] Insufficient stock. Available: {product_info['stock_quantity']} units, Requested: {quantity} units"
+        
+        # Validate quantity
+        if quantity <= 0:
+            return "[Error] Quantity must be greater than 0"
+        
+        # Generate new order ID
+        existing_order_ids = orders_df['order_id'].tolist()
+        order_counter = len(existing_order_ids) + 1
+        new_order_id = f"ORD-{order_counter:03d}"
+        
+        # Calculate pricing
+        unit_price = product_info['price']
+        total_amount = unit_price * quantity
+        
+        # Get current date
+        from datetime import datetime
+        order_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # Create new order record
+        new_order = {
+            'order_id': new_order_id,
+            'customer_id': customer_id,
+            'product_id': product_id,
+            'quantity': quantity,
+            'unit_price': unit_price,
+            'total_amount': total_amount,
+            'order_date': order_date,
+            'status': 'processing',
+            'shipping_address': shipping_address
+        }
+        
+        # Add order to orders dataframe
+        new_order_df = pd.DataFrame([new_order])
+        updated_orders_df = pd.concat([orders_df, new_order_df], ignore_index=True)
+        
+        # Update inventory
+        products_df.loc[products_df['product_id'] == product_id, 'stock_quantity'] -= quantity
+        
+        # Update customer total orders
+        customers_df.loc[customers_df['customer_id'] == customer_id, 'total_orders'] += 1
+        
+        # Save updated data
+        updated_orders_df.to_csv(orders_path, index=False)
+        products_df.to_csv(products_path, index=False)
+        customers_df.to_csv(customers_path, index=False)
+        
+        # Build confirmation response
+        output_lines = []
+        output_lines.append("✅ Order Successfully Placed!")
+        output_lines.append("=" * 40)
+        output_lines.append(f"Order ID: {new_order_id}")
+        output_lines.append(f"Customer: {customer_info['name']} ({customer_id})")
+        output_lines.append(f"Product: {product_info['name']}")
+        output_lines.append(f"Quantity: {quantity} units")
+        output_lines.append(f"Unit Price: ${unit_price:.2f}")
+        output_lines.append(f"Total Amount: ${total_amount:.2f}")
+        output_lines.append(f"Order Date: {order_date}")
+        output_lines.append(f"Status: Processing")
+        output_lines.append(f"Shipping Address: {shipping_address}")
+        output_lines.append("")
+        output_lines.append(f"📦 Updated Stock: {product_info['stock_quantity'] - quantity} units remaining")
+        output_lines.append("")
+        output_lines.append("📧 Order confirmation will be sent to the customer's email address.")
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to place order: {str(e)}"
         
 
 
@@ -857,7 +959,8 @@ agent = Agent(model=bedrock_model, tools=[
     tool_order_lookup, 
     tool_customer_profile, 
     tool_order_status_summary, 
-    tool_inventory_check
+    tool_inventory_check,
+    tool_place_order
 ])
 
 # Display conversation history
@@ -893,43 +996,62 @@ if prompt := st.chat_input("Ask me anything about IKEA products or your order...
         
         conversation_context += f"\nCurrent user question: {prompt}"
         
-        system_preamble = (
-            "You are an IKEA AI Customer Support Agent with access to comprehensive tools for customer assistance. "
-            "ALWAYS use the appropriate tool to get real data before responding. Here are your available tools:\n\n"
-            
-            "🔍 KNOWLEDGE BASE TOOLS:\n"
-            "• tool_retrieve_chunks(question, search_type='general') - Search the knowledge base for general information about IKEA products, policies, or procedures. Use search_type='product' for formatted product information.\n\n"
-            
-            "🛍️ PRODUCT TOOLS:\n"
-            "• tool_inventory_check(product_id, category, low_stock_threshold=10) - Check inventory levels for specific products or entire categories. Shows stock status and low stock warnings\n\n"
-            
-            "📦 ORDER MANAGEMENT TOOLS:\n"
-            "• tool_order_lookup(order_id) - Get detailed information about a specific order including customer details, product info, and shipping status\n"
-            "• tool_customer_profile(customer_id, email) - Retrieve customer profile and complete order history for a specific customer\n"
-            "• tool_order_status_summary() - Get overview of all orders with status breakdown, revenue metrics, and recent order activity\n\n"
-            
-            "📋 USAGE GUIDELINES:\n"
-            "• For order questions: Use tool_order_lookup for specific orders or tool_customer_profile for customer history\n"
-            "• For product questions: Use tool_inventory_check for stock levels or tool_retrieve_chunks for product information\n"
-            "• For general IKEA help: Use tool_retrieve_chunks to search the knowledge base\n"
-            "• For business insights: Use tool_order_status_summary for order analytics\n"
-            "• Always provide specific, data-driven responses based on the information you retrieve\n"
-            "• Be helpful, friendly, and professional in all interactions\n"
-            "• If a tool returns an error, try alternative approaches or ask the customer for clarification"
-        )
-        
+        system_prompt = """You are an IKEA AI Customer Support Agent. Your primary goal is to assist customers accurately and efficiently while strictly protecting their privacy and IKEA's internal data. 
+
+        🔒 SECURITY & PRIVACY MANDATE: Your #1 Priority
+        - NEVER divulge Personally Identifiable Information (PII) like full customer names, shipping addresses, phone numbers, or full email addresses unless you are verifying information the customer has *already provided*.
+        - NEVER share internal business data or tools you have access to.
+        - ALWAYS authenticate the user before accessing placing an order or accessing order details.
+        - ALWAYS authenticate the user before accessing customer details.
+
+        ---
+
+        ### Authentication Workflow
+        Before using any `ORDER MANAGEMENT TOOLS` for a specific customer, you MUST first authenticate them by asking one of the two pieces of information, such as:
+        1. The Order ID OR
+        2. The email address used to place the order.
+
+        Only after the tool confirms a match should you proceed to answer their specific question.
+
+        ---
+
+        ### Available Tools
+
+        You must use the appropriate tool to get real data before responding.
+
+         🔍 KNOWLEDGE BASE TOOLS (Public Information):
+         * `tool_retrieve_chunks(question)` - Search the knowledge base for information about IKEA products. Do not provide information that is not present in the result of this tool.
+
+        🛍️ PRODUCT TOOLS (Public Information):
+        * `tool_inventory_check(product_id, category, low_stock_threshold=10)` - Check public inventory levels for specific products or categories.
+
+        📦 ORDER MANAGEMENT TOOLS (Requires Authentication):
+        * `tool_order_lookup(order_id)` - Get details for a specific order. **Only answer the user's direct question.** Do not recite all the data from this tool. For example, if asked for shipping status, only provide the shipping status.
+        * `tool_customer_profile(customer_id, email)` - Use this tool primarily to **verify** customer information, not to disclose it.
+        * `tool_place_order(customer_id, product_id, quantity, shipping_address)` - Place a new order. Before executing, you must confirm all details (product, quantity, and address) with the customer one final time.
+
+        ---
+
+        ### Usage Guidelines & Principles
+
+        * Principle of Least Privilege: When answering a question after authentication, provide **only the information requested**.
+        * Bad Example: User asks "Has my order shipped?" and you reply with the order number, full contents, shipping address, and tracking number.
+        * Good Example: User asks "Has my order shipped?" and you reply "Yes, I can confirm order #[Order ID] has shipped. Would you like the tracking information?"
+        * Be Helpful, Friendly, and Professional: Maintain the IKEA brand voice.
+        * Handle Errors Gracefully: If a tool returns an error or no data, inform the customer and ask for clarification (e.g., "I couldn't find that order ID. Could you please double-check the number?").
+        """
+    
         # Display assistant thinking message immediately
         with st.chat_message("assistant"):
             thinking_placeholder = st.empty()
             
             with thinking_placeholder.container():
                 with st.spinner("Thinking..."):
-                    response = agent(f"{system_preamble}\n\n{conversation_context}")
+                    response = agent(f"{system_prompt}\n\n{conversation_context}")
             
             # Debug: Check if response is valid
             if response is None or str(response).strip() == "":
-                response = "I apologize, but I'm having trouble processing your request. Please try again."                                                                                                        
-            
+                response = "I apologize, but I'm having trouble processing your request. Please try again."                                                                                      
             # Replace thinking message with actual response
             thinking_placeholder.write(str(response))
         

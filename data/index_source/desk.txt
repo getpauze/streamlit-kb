@@ -2,6 +2,8 @@ Here are the extracted product details for the TROTTEN desk sit/stand, white, 63
 
 Product Overview
 
+Product Id: PROD-002
+
 Price: $369.99
 
 Warranty: 10-year limited warranty
