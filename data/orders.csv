@@ -1,0 +1,11 @@
+order_id,customer_id,product_id,quantity,unit_price,total_amount,order_date,status,shipping_address
+ORD-001,CUST-001,PROD-001,2,29.99,59.98,2024-01-15,shipped,"123 Main St, New York, NY 10001"
+ORD-002,CUST-002,PROD-002,1,149.99,149.99,2024-01-16,delivered,"456 Oak Ave, Los Angeles, CA 90210"
+ORD-003,CUST-001,PROD-003,3,19.99,59.97,2024-01-17,processing,"123 Main St, New York, NY 10001"
+ORD-004,CUST-003,PROD-001,1,29.99,29.99,2024-01-18,shipped,"789 Pine Rd, Chicago, IL 60601"
+ORD-005,CUST-004,PROD-004,2,79.99,159.98,2024-01-19,delivered,"321 Elm St, Houston, TX 77001"
+ORD-006,CUST-002,PROD-005,1,199.99,199.99,2024-01-20,cancelled,"456 Oak Ave, Los Angeles, CA 90210"
+ORD-007,CUST-005,PROD-002,2,149.99,299.98,2024-01-21,processing,"654 Maple Dr, Phoenix, AZ 85001"
+ORD-008,CUST-003,PROD-003,1,19.99,19.99,2024-01-22,shipped,"789 Pine Rd, Chicago, IL 60601"
+ORD-009,CUST-001,PROD-004,1,79.99,79.99,2024-01-23,delivered,"123 Main St, New York, NY 10001"
+ORD-010,CUST-006,PROD-001,4,29.99,119.96,2024-01-24,processing,"987 Cedar Ln, Miami, FL 33101"

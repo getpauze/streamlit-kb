@@ -1,0 +1,9 @@
+product_id,name,category,price,stock_quantity,description,created_date
+PROD-001,Wireless Headphones,Electronics,29.99,150,High-quality wireless headphones with noise cancellation,2023-10-01
+PROD-002,Smartphone,Electronics,149.99,75,Latest model smartphone with advanced features,2023-09-15
+PROD-003,Bluetooth Speaker,Electronics,19.99,200,Portable Bluetooth speaker with excellent sound quality,2023-11-01
+PROD-004,Office Chair,Furniture,79.99,50,Ergonomic office chair with lumbar support,2023-08-20
+PROD-005,Gaming Laptop,Electronics,199.99,25,High-performance gaming laptop with dedicated graphics,2023-12-01
+PROD-006,Desk Lamp,Furniture,39.99,100,LED desk lamp with adjustable brightness,2023-10-15
+PROD-007,Mechanical Keyboard,Electronics,89.99,80,RGB mechanical keyboard for gaming and typing,2023-11-20
+PROD-008,Monitor Stand,Furniture,49.99,60,Adjustable monitor stand to improve ergonomics,2023-09-30

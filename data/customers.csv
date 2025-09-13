@@ -1,0 +1,9 @@
+customer_id,name,email,phone,registration_date,status,total_orders
+CUST-001,John Smith,john.smith@email.com,555-0101,2023-12-01,active,3
+CUST-002,Sarah Johnson,sarah.j@email.com,555-0102,2023-11-15,active,2
+CUST-003,Mike Davis,mike.davis@email.com,555-0103,2024-01-10,active,2
+CUST-004,Emily Brown,emily.brown@email.com,555-0104,2023-10-20,active,1
+CUST-005,David Wilson,david.w@email.com,555-0105,2024-01-05,active,1
+CUST-006,Lisa Garcia,lisa.garcia@email.com,555-0106,2024-01-20,active,1
+CUST-007,Tom Anderson,tom.anderson@email.com,555-0107,2023-09-30,inactive,0
+CUST-008,Anna Taylor,anna.taylor@email.com,555-0108,2023-12-15,active,0
