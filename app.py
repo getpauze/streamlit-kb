@@ -727,11 +727,6 @@ if not st.session_state.get("vectorstore_loaded", False):
 # Sidebar navigation
 st.sidebar.title("🧭 Navigation")
 
-# -----------------------------------------------------------
-# MAIN PAGE: Ask Questions
-# -----------------------------------------------------------
-st.header("💬 Ask Questions")
-
 # Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
 if COLLECTION is None:
     load_collection_from_persist()
@@ -743,81 +738,16 @@ if COLLECTION is not None:
     except Exception as e:
         st.warning(f"Could not read collection count: {e}")
 
-if not st.session_state.get("vectorstore_loaded", False) and COLLECTION is None:
-    st.warning("⚠️ No index loaded. Please ensure the index exists in the data folder.")
-else:
-
-    # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
-    st.subheader("💬 Ask via LLM")
-    model_id = DEFAULT_LLM_MODEL_ID
-    temperature = DEFAULT_TEMPERATURE
-
-    # Build the Bedrock-backed Strands model + agent
-    bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
+# Build the Bedrock-backed Strands model + agent (use defaults)
+    bedrock_model = BedrockModel(model_id=DEFAULT_LLM_MODEL_ID, temperature=0.2, region=AWS_REGION)
     agent = Agent(model=bedrock_model, tools=[
         tool_retrieve_chunks, 
-        tool_product_search,
         tool_order_lookup, 
         tool_customer_profile, 
+        tool_product_search, 
         tool_order_status_summary, 
         tool_inventory_check
     ])
-
-    # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
-    st.subheader("💬 Ask via LLM")
-    model_id = DEFAULT_LLM_MODEL_ID
-    temperature = DEFAULT_TEMPERATURE
-
-    # Build the Bedrock-backed Strands model + agent
-    bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
-    agent = Agent(model=bedrock_model, tools=[
-        tool_retrieve_chunks, 
-        tool_product_search,
-        tool_order_lookup, 
-        tool_customer_profile, 
-        tool_order_status_summary, 
-        tool_inventory_check
-    ])
-
-    question = st.text_input("Your question")
-    if st.button("Generate Answer") and question:
-        with st.spinner("Retrieving and generating answer..."):
-            system_preamble = (
-                "You are a helpful assistant for AIkea, a furniture and order management system. You have access to these specialized tools: "
-                "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
-                "2) `tool_product_search` - search product information in the knowledge base (chairs, desks, mattresses, sofas) "
-                "3) `tool_order_lookup` - get detailed information about a specific order by ID "
-                "4) `tool_customer_profile` - get customer profile and order history by customer_id or email "
-                "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
-                "6) `tool_inventory_check` - check stock levels for products or categories "
-                "Use the appropriate tool(s) based on the user's question. For product-related questions, use tool_product_search. "
-                "For order management questions, use the order tools. Provide helpful answers with proper citations. "
-                "If you use any context, cite it inline as [Source 1], [Source 2], etc. If no context is relevant, say so."
-            )
-            response = agent(f"{system_preamble}\n\nUser question: {question}")
-
-            # Show final answer
-            st.markdown("### 💬 Answer")
-            st.write(str(response))
-
-            # Show retrieved chunks (the exact ones the tool pulled)
-            st.markdown("### 📄 Retrieved Chunks (from Chroma)")
-            rows = _get_last_sources()
-            if not rows:
-                st.info("No chunks returned.")
-            else:
-                import pandas as pd
-                table = pd.DataFrame([
-                    {
-                        "Rank": i + 1,
-                        "Source": r["meta"].get("source", "unknown"),
-                        "Chunk#": r["meta"].get("chunk", None),
-                        "Distance": r.get("distance", None),
-                        "Preview": (r["text"] or "")[:140].replace("\n", " ") + ("…" if len(r["text"]) > 140 else "")
-                    }
-                    for i, r in enumerate(rows)
-                ])
-                st.dataframe(table, width=True)
 
 # Display conversation history
 if st.session_state["conversation_history"]:
