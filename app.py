@@ -1,48 +1,3 @@
-# ===========================================================
-# 🧠 GenAI Knowledgebase (Strands + Bedrock + ChromaDB)
-# ===========================================================
-# 📚 Classroom Objective:
-# This application demonstrates a simple Retrieval-Augmented Generation (RAG) pipeline:
-#  1) Upload & process documents (PDF, Markdown, TXT)
-#  2) Split text into chunks
-#  3) Create vector embeddings (Amazon Titan via AWS Bedrock, using boto3)
-#  4) Store vectors in ChromaDB (local persistent vector database)
-#  5) Retrieve the most relevant chunks using vector similarity
-#  6) Answer questions with an LLM (via Strands Agent + Bedrock), grounded in retrieved chunks
-#
-# 🔧 Tech choices:
-#  - No LangChain: embedding and vector store are called directly
-#  - Strands Agents: small agent framework to define LLM + tool(s)
-#  - ChromaDB: local vector database with persistent storage
-#  - Streamlit: simple web UI for uploads, indexing, debugging, and Q&A
-#
-# -----------------------------------------------------------
-# REQUIREMENTS (install once):
-#   pip install streamlit python-dotenv PyPDF2 boto3 chromadb strands-agents
-#
-# -----------------------------------------------------------
-# AWS ENVIRONMENT:
-# You must have AWS credentials that allow Bedrock model invocation.
-# Minimum permission: bedrock:InvokeModel
-#
-# Optional .env file in the same directory:
-#   AWS_REGION=us-west-2
-#   EMBED_MODEL_ID=amazon.titan-embed-text-v1
-#   LLM_MODEL_ID=us.anthropic.claude-3-5-haiku-20241022-v1:0
-#
-# -----------------------------------------------------------
-# HOW TO RUN:
-#   streamlit run app.py
-#
-# -----------------------------------------------------------
-# TEACHING TIPS:
-# - Start by uploading a small .txt or .md file (or a short PDF).
-# - Click "Re-index Knowledgebase" so embeddings are created & stored.
-# - Use "Test Retrieval" to verify that chunks are being found.
-# - Then ask a question in "Ask via LLM" and inspect the cited chunks.
-# - Emphasize that tools must not call Streamlit APIs (they can run off-thread).
-# ===========================================================
-
 import os
 import json
 import time
@@ -303,9 +258,6 @@ def pregenerate_index() -> bool:
 
     # Add to Chroma
     COLLECTION.add(documents=docs, embeddings=embeddings, metadatas=metadatas, ids=ids)
-
-    print(f"✅ Pre-generated index with {len(docs)} chunks from {len(set(m['source'] for m in metadatas))} files.")
-    print(f"Index stored in: {PERSIST_ROOT}")
     return True
 
 
@@ -391,36 +343,6 @@ def tool_retrieve_chunks(question: str, search_type: str = "general") -> str:
 # ===========================================================
 # 🛠️ Order Management Tools
 # ===========================================================
-
-@tool
-def tool_product_search(search_term: str = None, category: str = None) -> str:
-    """
-    Search for product information in the knowledge base.
-    
-    Args:
-        search_term: Search term to look for in product descriptions
-        category: Product category to filter by (optional)
-    
-    Returns:
-        Product information from the knowledge base
-    """
-    global COLLECTION, K_RETRIEVE
-    if COLLECTION is None:
-        return "[Error] No knowledge base loaded. Please ensure the index is available."
-
-    # Build search query
-    if search_term and category:
-        query = f"{search_term} {category}"
-    elif search_term:
-        query = search_term
-    elif category:
-        query = category
-    else:
-        return "[Error] Please provide either search_term or category"
-
-    # Use the existing retrieval tool with product search type
-    return tool_retrieve_chunks(query, search_type="product")
-
 
 @tool
 def tool_order_lookup(order_id: str) -> str:
@@ -699,10 +621,213 @@ def tool_inventory_check(product_id: str = None, category: str = None, low_stock
         
 
 
+
 # ===========================================================
 # 🖥️ Streamlit UI
 # ===========================================================
-st.title("🧠 AIkea")
+# IKEA Color Scheme CSS
+st.markdown("""
+<style>
+    /* IKEA Color Palette */
+    :root {
+        --ikea-blue: #0058A3;
+        --ikea-yellow: #FFD700;
+        --ikea-light-blue: #E8F4FD;
+        --ikea-dark-blue: #003D82;
+        --ikea-gray: #F5F5F5;
+        --ikea-dark-gray: #333333;
+    }
+    
+    /* Main container styling */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    /* Header styling */
+    .main h1 {
+        color: var(--ikea-blue);
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+    
+    /* Sidebar styling */
+    .css-1d391kg {
+        background-color: var(--ikea-light-blue);
+    }
+    
+    .css-1d391kg .css-1v0mbdj {
+        color: var(--ikea-blue);
+        font-weight: 600;
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        background-color: var(--ikea-blue);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        background-color: var(--ikea-dark-blue);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0, 88, 163, 0.3);
+    }
+    
+    /* Primary button styling */
+    .stButton > button[kind="primary"] {
+        background-color: var(--ikea-yellow);
+        color: var(--ikea-dark-blue);
+    }
+    
+    .stButton > button[kind="primary"]:hover {
+        background-color: #FFC700;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(255, 215, 0, 0.3);
+    }
+    
+    /* Info boxes */
+    .stAlert {
+        border-radius: 8px;
+        border-left: 4px solid var(--ikea-blue);
+    }
+    
+    /* Success boxes */
+    .stAlert[data-testid="stAlert"]:has(.stMarkdown:contains("✅")) {
+        background-color: #E8F5E8;
+        border-left-color: #28A745;
+    }
+    
+    /* Warning boxes */
+    .stAlert[data-testid="stAlert"]:has(.stMarkdown:contains("⚠️")) {
+        background-color: #FFF3CD;
+        border-left-color: #FFC107;
+    }
+    
+    /* Error boxes */
+    .stAlert[data-testid="stAlert"]:has(.stMarkdown:contains("❌")) {
+        background-color: #F8D7DA;
+        border-left-color: #DC3545;
+    }
+    
+    /* Chat message styling */
+    .stChatMessage {
+        background-color: var(--ikea-gray);
+        border-radius: 12px;
+        margin: 0.5rem 0;
+        padding: 1rem;
+    }
+    
+    .stChatMessage[data-testid="stChatMessage"]:has([data-testid="stChatMessageUser"]) {
+        background-color: var(--ikea-light-blue);
+    }
+    
+    /* Dataframe styling */
+    .dataframe {
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background-color: var(--ikea-light-blue);
+        color: var(--ikea-blue);
+        font-weight: 600;
+    }
+    
+    /* Text input styling */
+    .stTextInput > div > div > input {
+        border-radius: 8px;
+        border: 2px solid #E0E0E0;
+        transition: border-color 0.3s ease;
+    }
+    
+    .stTextInput > div > div > input:focus {
+        border-color: var(--ikea-blue);
+        box-shadow: 0 0 0 2px rgba(0, 88, 163, 0.2);
+    }
+    
+    /* Slider styling */
+    .stSlider > div > div > div > div {
+        background-color: var(--ikea-blue);
+    }
+    
+    /* Selectbox styling */
+    .stSelectbox > div > div {
+        border-radius: 8px;
+        border: 2px solid #E0E0E0;
+    }
+    
+    .stSelectbox > div > div:focus-within {
+        border-color: var(--ikea-blue);
+        box-shadow: 0 0 0 2px rgba(0, 88, 163, 0.2);
+    }
+    
+    
+    /* Chat container improvements */
+    .stChatMessage {
+        margin-bottom: 1rem;
+    }
+    
+    /* Chat input styling */
+    .stChatInput > div > div > textarea {
+        border-radius: 12px;
+        border: 1px solid #E0E0E0;
+        padding: 12px 16px;
+        font-size: 0.95rem;
+    }
+    
+    .stChatInput > div > div > textarea:focus {
+        border-color: var(--ikea-blue);
+        box-shadow: 0 0 0 2px rgba(0, 88, 163, 0.1);
+    }
+    
+    /* Reduce default Streamlit header spacing */
+    .main .block-container {
+        padding-top: 0.5rem;
+        padding-bottom: 1rem;
+        max-width: 100%;
+    }
+    
+    /* Hide default Streamlit header padding */
+    .stApp > header {
+        background-color: transparent;
+    }
+    
+    /* Remove top padding from main container */
+    .main > div {
+        padding-top: 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Custom centered header with minimal spacing
+st.markdown("""
+<div style="text-align: center; margin: -2rem 0 0.5rem 0;">
+    <h1 style="color: #333; font-size: 1.8rem; font-weight: 600; margin: 0; padding: 0;">
+        🏠 IKEA AI Customer Support Agent
+    </h1>
+</div>
+""", unsafe_allow_html=True)
+# Track whether we've created an index during this session
+if "vectorstore_loaded" not in st.session_state:
+    st.session_state["vectorstore_loaded"] = False
+
+# Initialize conversation history
+if "conversation_history" not in st.session_state:
+    st.session_state["conversation_history"] = []
+
+
+# -----------------------------------------------------------
+# Live Chat Interface
+# -----------------------------------------------------------
+# Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
 
 # Track whether we've created an index during this session
 if "vectorstore_loaded" not in st.session_state:
@@ -717,143 +842,122 @@ if not st.session_state.get("vectorstore_loaded", False):
     # First, try to pregenerate the index
     if pregenerate_index():
         st.session_state["vectorstore_loaded"] = True
-        st.success("✅ Pre-generated ChromaDB index from index_source folder")
     elif load_collection_from_persist():
         st.session_state["vectorstore_loaded"] = True
-        st.success("✅ Loaded pre-generated ChromaDB index from data folder")
     else:
         st.error("❌ No index found. Please ensure the index exists in the data folder.")
 
-# Sidebar navigation
-st.sidebar.title("🧭 Navigation")
-
-# Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
 if COLLECTION is None:
     load_collection_from_persist()
 
-# Quick health check (count chunks)
-if COLLECTION is not None:
-    try:
-        st.info(f"📦 Collection: {COLLECTION_NAME} | 🔢 Chunks: {COLLECTION.count()}")
-    except Exception as e:
-        st.warning(f"Could not read collection count: {e}")
-
 # Build the Bedrock-backed Strands model + agent (use defaults)
-    bedrock_model = BedrockModel(model_id=DEFAULT_LLM_MODEL_ID, temperature=0.2, region=AWS_REGION)
-    agent = Agent(model=bedrock_model, tools=[
-        tool_retrieve_chunks, 
-        tool_order_lookup, 
-        tool_customer_profile, 
-        tool_product_search, 
-        tool_order_status_summary, 
-        tool_inventory_check
-    ])
+bedrock_model = BedrockModel(model_id=DEFAULT_LLM_MODEL_ID, temperature=0.2, region_name=AWS_REGION)
+agent = Agent(model=bedrock_model, tools=[
+    tool_retrieve_chunks, 
+    tool_order_lookup, 
+    tool_customer_profile, 
+    tool_order_status_summary, 
+    tool_inventory_check
+])
 
 # Display conversation history
 if st.session_state["conversation_history"]:
-    for i, message in enumerate(st.session_state["conversation_history"]):
-        if message["role"] == "user":
-            with st.chat_message("user"):
-                st.write(message["content"])
-        else:
-            with st.chat_message("assistant"):
-                st.write(message["content"])
+    for message in st.session_state["conversation_history"]:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 else:
-    # Welcome message
+    # Welcome message when no conversation history
     with st.chat_message("assistant"):
-        st.write("Hello! I'm your AI assistant for order management and product information. How can I help you today?")
-        st.write("You can ask me about:")
-        st.write("• Products and inventory")
-        st.write("• Order status and tracking")
-        st.write("• Customer information")
-        st.write("• Or anything else you need help with!")
+        st.write("Hello! I'm your IKEA AI Customer Support Agent. How can I help you today?")
 
 # Chat input at the bottom
-if prompt := st.chat_input("Ask me anything..."):
-    # Add user message to history
+if prompt := st.chat_input("Ask me anything about IKEA products or your order..."):
+    # Add user message to history and immediately display it
     st.session_state["conversation_history"].append({
         "role": "user",
         "content": prompt,
         "timestamp": time.time()
     })
     
-    # Display user message immediately
+    # Display the user's message immediately
     with st.chat_message("user"):
         st.write(prompt)
     
-    # Generate response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            # Build conversation context for the agent
-            conversation_context = "Previous conversation:\n"
-            for msg in st.session_state["conversation_history"][:-1]:  # Exclude the current user message
-                role = "User" if msg["role"] == "user" else "Assistant"
-                conversation_context += f"{role}: {msg['content']}\n"
+    # Generate assistant response
+    try:
+        # Build conversation context for the agent
+        conversation_context = "Previous conversation:\n"
+        for msg in st.session_state["conversation_history"][:-1]:  # Exclude the current user message
+            role = "User" if msg["role"] == "user" else "Assistant"
+            conversation_context += f"{role}: {msg['content']}\n"
+        
+        conversation_context += f"\nCurrent user question: {prompt}"
+        
+        system_preamble = (
+            "You are an IKEA AI Customer Support Agent with access to comprehensive tools for customer assistance. "
+            "ALWAYS use the appropriate tool to get real data before responding. Here are your available tools:\n\n"
             
-            conversation_context += f"\nCurrent user question: {prompt}"
+            "🔍 KNOWLEDGE BASE TOOLS:\n"
+            "• tool_retrieve_chunks(question, search_type='general') - Search the knowledge base for general information about IKEA products, policies, or procedures. Use search_type='product' for formatted product information.\n\n"
             
-            system_preamble = (
-                "You are a helpful assistant for an order management system. You have access to these specialized tools: "
-                "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
-                "2) `tool_order_lookup` - get detailed information about a specific order by ID "
-                "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
-                "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
-                "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
-                "6) `tool_inventory_check` - check stock levels for products or categories "
-                "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
-                "Maintain context from the conversation history and provide relevant follow-up suggestions. "
-                "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
-                "If no context is relevant, say so."
-            )
+            "🛍️ PRODUCT TOOLS:\n"
+            "• tool_inventory_check(product_id, category, low_stock_threshold=10) - Check inventory levels for specific products or entire categories. Shows stock status and low stock warnings\n\n"
             
-            response = agent(f"{system_preamble}\n\n{conversation_context}")
+            "📦 ORDER MANAGEMENT TOOLS:\n"
+            "• tool_order_lookup(order_id) - Get detailed information about a specific order including customer details, product info, and shipping status\n"
+            "• tool_customer_profile(customer_id, email) - Retrieve customer profile and complete order history for a specific customer\n"
+            "• tool_order_status_summary() - Get overview of all orders with status breakdown, revenue metrics, and recent order activity\n\n"
             
-            # Get sources used in this response
-            sources = _get_last_sources()
+            "📋 USAGE GUIDELINES:\n"
+            "• For order questions: Use tool_order_lookup for specific orders or tool_customer_profile for customer history\n"
+            "• For product questions: Use tool_inventory_check for stock levels or tool_retrieve_chunks for product information\n"
+            "• For general IKEA help: Use tool_retrieve_chunks to search the knowledge base\n"
+            "• For business insights: Use tool_order_status_summary for order analytics\n"
+            "• Always provide specific, data-driven responses based on the information you retrieve\n"
+            "• Be helpful, friendly, and professional in all interactions\n"
+            "• If a tool returns an error, try alternative approaches or ask the customer for clarification"
+        )
+        
+        # Display assistant thinking message immediately
+        with st.chat_message("assistant"):
+            thinking_placeholder = st.empty()
             
-            # Add assistant response to history
-            st.session_state["conversation_history"].append({
-                "role": "assistant",
-                "content": str(response),
-                "sources": sources,
-                "timestamp": time.time()
-            })
+            with thinking_placeholder.container():
+                with st.spinner("Thinking..."):
+                    response = agent(f"{system_preamble}\n\n{conversation_context}")
             
-            # Display the response
-            st.write(str(response))
+            # Debug: Check if response is valid
+            if response is None or str(response).strip() == "":
+                response = "I apologize, but I'm having trouble processing your request. Please try again."                                                                                                        
             
-            # Show sources in a subtle way
-            if sources:
-                with st.expander("📄 Sources", expanded=False):
-                    for j, source in enumerate(sources, 1):
-                        src = source["meta"].get("source", "unknown")
-                        chk = source["meta"].get("chunk", None)
-                        dist = source.get("distance", None)
-                        title = f"Source {j} — {src}" + (f" chunk {chk}" if chk is not None else "") + (f" (distance: {dist:.4f})" if isinstance(dist, (int, float)) else "")
-                        with st.expander(title, expanded=False):
-                            st.write(source["text"] or "")
-
-# Simple controls at the bottom
-col1, col2, col3 = st.columns([1, 1, 1])
-with col1:
-    if st.button("🗑️ Clear", help="Clear conversation"):
-        st.session_state["conversation_history"] = []
-        st.rerun()
-with col2:
-    if st.button("📋 Export", help="Download chat"):
-        if st.session_state["conversation_history"]:
-            chat_text = "Conversation Export\n" + "="*50 + "\n\n"
-            for message in st.session_state["conversation_history"]:
-                role = "User" if message["role"] == "user" else "Assistant"
-                chat_text += f"{role}: {message['content']}\n\n"
-            
-            st.download_button(
-                label="Download",
-                data=chat_text,
-                file_name=f"conversation_{int(time.time())}.txt",
-                mime="text/plain"
-            )
-with col3:
-    if st.button("🔄 New Topic", help="Start fresh"):
-        st.session_state["conversation_history"] = []
-        st.rerun()
+            # Replace thinking message with actual response
+            thinking_placeholder.write(str(response))
+        
+        # Get sources used in this response
+        sources = _get_last_sources()
+        
+        # Add assistant response to history
+        st.session_state["conversation_history"].append({
+            "role": "assistant",
+            "content": str(response),
+            "sources": sources,
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        # Handle any errors in response generation
+        error_response = f"I apologize, but I encountered an error: {str(e)}. Please try again."
+        
+        # Display error message immediately
+        with st.chat_message("assistant"):
+            st.write(error_response)
+        
+        st.session_state["conversation_history"].append({
+            "role": "assistant",
+            "content": error_response,
+            "sources": [],
+            "timestamp": time.time()
+        })
+    
+    # Rerun to show the new messages in the conversation history
+    st.rerun()
