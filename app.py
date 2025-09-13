@@ -53,7 +53,6 @@ from typing import List, Dict, Any
 
 import streamlit as st
 from dotenv import load_dotenv
-import PyPDF2
 import pandas as pd
 
 import boto3
@@ -82,12 +81,12 @@ DEFAULT_LLM_MODEL_ID = os.getenv(
     "LLM_MODEL_ID",
     "us.anthropic.claude-3-5-haiku-20241022-v1:0"  # Bedrock Anthropic model (Claude Haiku as example)
 )
+DEFAULT_TEMPERATURE = 0.2
 
 # Folder to store uploads & converted text
 DATA_DIR = "data"
-# Temporary root folder to store Chroma persistent data for this run
-TEMP_DIR = tempfile.mkdtemp(prefix="kb_chroma_")
-PERSIST_ROOT = os.path.join(TEMP_DIR, "chroma_db")
+# Persistent ChromaDB storage in data folder
+PERSIST_ROOT = os.path.join(DATA_DIR, "chroma_db")
 
 # Ensure the data directory exists so uploads don’t fail
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -164,24 +163,8 @@ def titan_embed(text: str) -> List[float]:
 
 
 # ===========================================================
-# 📄 PDF & Text Utilities (No LangChain)
+# 📄 Text Utilities
 # ===========================================================
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    Extract plain text from a PDF file using PyPDF2.
-
-    NOTE (teaching):
-    - PDF text extraction is best-effort; complex layout/graphics can degrade results.
-    - For best RAG quality, prefer clean .txt or .md source files when available.
-    """
-    text = ""
-    with open(pdf_path, "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            t = page.extract_text() or ""
-            if t:
-                text += t + "\n\n"
-    return text.strip()
 
 
 def split_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
@@ -233,53 +216,65 @@ def reset_collection(client, name: str):
 
 def load_collection_from_persist() -> bool:
     """
-    Rehydrate the persistent Chroma client/collection after Streamlit reruns.
-    Teaching note: Streamlit reruns the script on every interaction, so we reopen the collection
-    from a path stored in session_state, if available.
+    Load the persistent Chroma client/collection from the data folder.
     """
     global CHROMA_CLIENT, COLLECTION
-    persist_dir = st.session_state.get("persist_dir")
-    if not persist_dir:
+    
+    if not os.path.exists(PERSIST_ROOT):
         return False
+        
     try:
-        CHROMA_CLIENT = new_chroma_client(persist_dir)
+        CHROMA_CLIENT = new_chroma_client(PERSIST_ROOT)
         COLLECTION = CHROMA_CLIENT.get_or_create_collection(COLLECTION_NAME)
+        # Update session state for consistency
+        st.session_state["persist_dir"] = PERSIST_ROOT
+        st.session_state["vectorstore_loaded"] = True
         return True
     except Exception as e:
-        st.error(f"Failed to load collection: {e}")
+        st.warning(f"Failed to load from persistent folder: {e}")
         return False
 
 
-# ===========================================================
-# 🧱 Indexing Pipeline
-# ===========================================================
-def reindex_knowledgebase() -> bool:
+def pregenerate_index() -> bool:
     """
-    1) Reads all .txt/.md files in DATA_DIR
-    2) Splits into overlapping chunks
-    3) Creates embeddings with Titan
-    4) Stores documents + embeddings + metadata in Chroma
+    Pre-generate the ChromaDB index using all .txt files from the index_source folder.
+    This function can be called to create the initial index.
     """
     global CHROMA_CLIENT, COLLECTION
 
-    # 1) Gather file contents
-    docs, ids, metadatas = [], [], []
-    files = [f for f in os.listdir(DATA_DIR) if f.endswith((".txt", ".md"))]
-    if not files:
-        st.error("No .txt or .md files found. Upload or convert PDFs first.")
+    # Ensure the data directory exists
+    os.makedirs(PERSIST_ROOT, exist_ok=True)
+
+    # Define the index source directory
+    index_source_dir = os.path.join(DATA_DIR, "index_source")
+    
+    if not os.path.exists(index_source_dir):
+        print(f"Error: Index source directory not found: {index_source_dir}")
         return False
 
-    for fname in files:
-        path = os.path.join(DATA_DIR, fname)
+    # 1) Gather file contents from all .txt files in index_source folder
+    docs, ids, metadatas = [], [], []
+    txt_files = [f for f in os.listdir(index_source_dir) if f.endswith('.txt')]
+    
+    if not txt_files:
+        print(f"Error: No .txt files found in {index_source_dir}")
+        return False
+    
+    print(f"Found {len(txt_files)} .txt files to index:")
+    for fname in txt_files:
+        print(f"  - {fname}")
+    
+    for fname in txt_files:
+        path = os.path.join(index_source_dir, fname)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
-            st.warning(f"Skipping {fname}: {e}")
+            print(f"Error reading {fname}: {e}")
             continue
 
         if not content.strip():
-            st.warning(f"Skipping empty file: {fname}")
+            print(f"Warning: {fname} is empty, skipping...")
             continue
 
         # 2) Split into chunks
@@ -290,40 +285,27 @@ def reindex_knowledgebase() -> bool:
             metadatas.append({"source": fname, "chunk": i})  # Store source & chunk index
 
     if not docs:
-        st.error("No valid chunks produced. Check your files.")
+        print("Error: No valid chunks produced from source files.")
         return False
 
-    # 3) Create a new persistent directory for this index run
-    persist_dir = os.path.join(PERSIST_ROOT, f"run_{int(time.time())}")
-    os.makedirs(persist_dir, exist_ok=True)
-
-    CHROMA_CLIENT = new_chroma_client(persist_dir)
+    # 3) Create Chroma client and collection
+    CHROMA_CLIENT = new_chroma_client(PERSIST_ROOT)
     COLLECTION = reset_collection(CHROMA_CLIENT, COLLECTION_NAME)
 
-    # 4) Embed and add to Chroma (simple per-item loop; easy to follow)
-    batch_size = 32
-    total = len(docs)
+    # 4) Embed and add to Chroma
+    print(f"Creating embeddings for {len(docs)} chunks...")
     embeddings = []
+    
+    for i, doc in enumerate(docs):
+        embeddings.append(titan_embed(doc))
+        if (i + 1) % 10 == 0:
+            print(f"Embedded {i + 1}/{len(docs)} chunks")
 
-    with st.spinner("Embedding chunks with Titan..."):
-        for i in range(0, total, batch_size):
-            batch = docs[i : i + batch_size]
-            for b in batch:
-                embeddings.append(titan_embed(b))
-            st.write(f"Embedded {min(i + batch_size, total)}/{total} chunks")
-
-    # Add to Chroma (documents + embeddings + metadata + ids)
+    # Add to Chroma
     COLLECTION.add(documents=docs, embeddings=embeddings, metadatas=metadatas, ids=ids)
 
-    # Save persistence path in session so we can reopen after rerun
-    st.session_state["vectorstore_loaded"] = True
-    st.session_state["persist_dir"] = persist_dir
-
-    st.success(f"✅ Indexed {len(docs)} chunks from {len(set(m['source'] for m in metadatas))} file(s).")
-    try:
-        st.info(f"🔢 Collection count: {COLLECTION.count()}")
-    except Exception:
-        pass
+    print(f"✅ Pre-generated index with {len(docs)} chunks from {len(set(m['source'] for m in metadatas))} files.")
+    print(f"Index stored in: {PERSIST_ROOT}")
     return True
 
 
@@ -331,31 +313,25 @@ def reindex_knowledgebase() -> bool:
 # 🛠️ Retrieval Tool (Strands) — NO Streamlit calls inside!
 # ===========================================================
 @tool
-def tool_retrieve_chunks(question: str) -> str:
+def tool_retrieve_chunks(question: str, search_type: str = "general") -> str:
     """
-    Retrieval tool for the Strands Agent.
-
-    Contract:
-    - Uses the global Chroma COLLECTION (already built/loaded).
-    - Embeds the user question with Titan.
-    - Queries top-K similar chunks from Chroma.
-    - Stores the results in a thread-safe buffer for the UI to display.
-    - Returns a formatted context block for the agent to read.
-
-    IMPORTANT:
-    - This function must not call any Streamlit APIs (can run off the main thread).
-    - Use the _set_last_sources() helper to pass data back to the UI.
+    Comprehensive retrieval tool for searching the knowledge base index.
+    
+    Args:
+        question: Natural language query to search for
+        search_type: Type of search - "general" for raw chunks, "product" for formatted product info
+    
+    Returns:
+        Relevant information from the knowledge base, formatted based on search_type
     """
     global COLLECTION, K_RETRIEVE
     if COLLECTION is None:
-        return "[No index loaded]"
+        return "[Error] No knowledge base loaded. Please ensure the index is available."
 
     # 1) Embed the question
     q_vec = titan_embed(question)
 
     # 2) Query Chroma for similar chunks
-    #    include=["documents","metadatas","distances"] → ids are returned by default in current Chroma versions,
-    #    but are NOT valid values in include[] for some versions. We avoid "ids" in include to be safe.
     res = COLLECTION.query(
         query_embeddings=[q_vec],
         n_results=max(1, int(K_RETRIEVE)),
@@ -366,7 +342,13 @@ def tool_retrieve_chunks(question: str) -> str:
     metas = (res.get("metadatas") or [[]])[0]
     dists = (res.get("distances") or [[]])[0]
 
-    # 3) Store for UI (thread-safe)
+    if not docs:
+        if search_type == "product":
+            return f"[Info] No product information found for query: '{question}'"
+        else:
+            return "[No matching context]"
+
+    # 3) Store for UI (thread-safe) - always store for UI display
     packed = []
     for d, m, dist in zip(docs, metas, dists):
         packed.append(
@@ -378,19 +360,67 @@ def tool_retrieve_chunks(question: str) -> str:
         )
     _set_last_sources(packed)
 
-    # 4) Build an agent-readable context block
-    out_lines = []
-    for rank, item in enumerate(packed, start=1):
-        src = item["meta"].get("source", "unknown")
-        dist = item.get("distance")
-        dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "NA"
-        out_lines.append(f"[Source {rank} — {src} — dist:{dist_str}]\n{item['text']}")
-    return "\n\n".join(out_lines) if out_lines else "[No matching context]"
+    # 4) Format output based on search type
+    if search_type == "product":
+        # Product-focused formatting
+        output_lines = []
+        output_lines.append(f"🛍️ Product Search Results for: '{question}'")
+        output_lines.append("=" * 60)
+        
+        for rank, item in enumerate(packed, start=1):
+            src = item["meta"].get("source", "unknown")
+            dist = item.get("distance")
+            dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "N/A"
+            
+            output_lines.append(f"\n📄 Result {rank} — {src} (relevance: {dist_str})")
+            output_lines.append("-" * 40)
+            output_lines.append(item["text"])
+        
+        return "\n".join(output_lines)
+    else:
+        # General formatting for agent consumption
+        out_lines = []
+        for rank, item in enumerate(packed, start=1):
+            src = item["meta"].get("source", "unknown")
+            dist = item.get("distance")
+            dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "NA"
+            out_lines.append(f"[Source {rank} — {src} — dist:{dist_str}]\n{item['text']}")
+        return "\n\n".join(out_lines)
 
 
 # ===========================================================
 # 🛠️ Order Management Tools
 # ===========================================================
+
+@tool
+def tool_product_search(search_term: str = None, category: str = None) -> str:
+    """
+    Search for product information in the knowledge base.
+    
+    Args:
+        search_term: Search term to look for in product descriptions
+        category: Product category to filter by (optional)
+    
+    Returns:
+        Product information from the knowledge base
+    """
+    global COLLECTION, K_RETRIEVE
+    if COLLECTION is None:
+        return "[Error] No knowledge base loaded. Please ensure the index is available."
+
+    # Build search query
+    if search_term and category:
+        query = f"{search_term} {category}"
+    elif search_term:
+        query = search_term
+    elif category:
+        query = category
+    else:
+        return "[Error] Please provide either search_term or category"
+
+    # Use the existing retrieval tool with product search type
+    return tool_retrieve_chunks(query, search_type="product")
+
 
 @tool
 def tool_order_lookup(order_id: str) -> str:
@@ -405,9 +435,9 @@ def tool_order_lookup(order_id: str) -> str:
     """
     try:
         # Load orders data
-        orders_path = os.path.join(DATA_DIR, "orders.csv")
-        customers_path = os.path.join(DATA_DIR, "customers.csv")
-        products_path = os.path.join(DATA_DIR, "products.csv")
+        orders_path = os.path.join(DATA_DIR, "oms", "orders.csv")
+        customers_path = os.path.join(DATA_DIR, "oms", "customers.csv")
+        products_path = os.path.join(DATA_DIR, "oms", "products.csv")
         
         if not all(os.path.exists(p) for p in [orders_path, customers_path, products_path]):
             return "[Error] Required CSV files not found"
@@ -479,9 +509,9 @@ def tool_customer_profile(customer_id: str = None, email: str = None) -> str:
         Customer profile and order history
     """
     try:
-        orders_path = os.path.join(DATA_DIR, "orders.csv")
-        customers_path = os.path.join(DATA_DIR, "customers.csv")
-        products_path = os.path.join(DATA_DIR, "products.csv")
+        orders_path = os.path.join(DATA_DIR, "oms", "orders.csv")
+        customers_path = os.path.join(DATA_DIR, "oms", "customers.csv")
+        products_path = os.path.join(DATA_DIR, "oms", "products.csv")
         
         if not all(os.path.exists(p) for p in [orders_path, customers_path, products_path]):
             return "[Error] Required CSV files not found"
@@ -539,73 +569,6 @@ def tool_customer_profile(customer_id: str = None, email: str = None) -> str:
 
 
 @tool
-def tool_product_search(category: str = None, min_price: float = None, max_price: float = None, 
-                       in_stock: bool = True, search_term: str = None) -> str:
-    """
-    Search for products with various filters.
-    
-    Args:
-        category: Product category to filter by
-        min_price: Minimum price filter
-        max_price: Maximum price filter
-        in_stock: Only show products in stock (default: True)
-        search_term: Search term for product name/description
-    
-    Returns:
-        Filtered product list
-    """
-    try:
-        products_path = os.path.join(DATA_DIR, "products.csv")
-        
-        if not os.path.exists(products_path):
-            return "[Error] Products CSV file not found"
-        
-        products_df = pd.read_csv(products_path)
-        
-        # Apply filters
-        filtered_df = products_df.copy()
-        
-        if category:
-            filtered_df = filtered_df[filtered_df['category'].str.contains(category, case=False, na=False)]
-        
-        if min_price is not None:
-            filtered_df = filtered_df[filtered_df['price'] >= min_price]
-        
-        if max_price is not None:
-            filtered_df = filtered_df[filtered_df['price'] <= max_price]
-        
-        if in_stock:
-            filtered_df = filtered_df[filtered_df['stock_quantity'] > 0]
-        
-        if search_term:
-            mask = filtered_df['name'].str.contains(search_term, case=False, na=False) | \
-                   filtered_df['description'].str.contains(search_term, case=False, na=False)
-            filtered_df = filtered_df[mask]
-        
-        # Build response
-        output_lines = []
-        output_lines.append(f"🛍️ Product Search Results ({len(filtered_df)} products found)")
-        output_lines.append("=" * 60)
-        
-        if filtered_df.empty:
-            output_lines.append("No products found matching your criteria")
-        else:
-            for _, product in filtered_df.iterrows():
-                output_lines.append(f"Product ID: {product['product_id']}")
-                output_lines.append(f"Name: {product['name']}")
-                output_lines.append(f"Category: {product['category']}")
-                output_lines.append(f"Price: ${product['price']}")
-                output_lines.append(f"Stock: {product['stock_quantity']} units")
-                output_lines.append(f"Description: {product['description']}")
-                output_lines.append("-" * 40)
-        
-        return "\n".join(output_lines)
-        
-    except Exception as e:
-        return f"[Error] Failed to search products: {str(e)}"
-
-
-@tool
 def tool_order_status_summary() -> str:
     """
     Get a summary of all order statuses and key metrics.
@@ -614,7 +577,7 @@ def tool_order_status_summary() -> str:
         Order status summary and metrics
     """
     try:
-        orders_path = os.path.join(DATA_DIR, "orders.csv")
+        orders_path = os.path.join(DATA_DIR, "oms", "orders.csv")
         
         if not os.path.exists(orders_path):
             return "[Error] Orders CSV file not found"
@@ -674,7 +637,7 @@ def tool_inventory_check(product_id: str = None, category: str = None, low_stock
         Inventory status information
     """
     try:
-        products_path = os.path.join(DATA_DIR, "products.csv")
+        products_path = os.path.join(DATA_DIR, "oms", "products.csv")
         
         if not os.path.exists(products_path):
             return "[Error] Products CSV file not found"
@@ -739,7 +702,7 @@ def tool_inventory_check(product_id: str = None, category: str = None, low_stock
 # ===========================================================
 # 🖥️ Streamlit UI
 # ===========================================================
-st.title("🧠 Knowledgebase (Strands + Bedrock) — No LangChain")
+st.title("🧠 AIkea")
 
 # Track whether we've created an index during this session
 if "vectorstore_loaded" not in st.session_state:
@@ -749,373 +712,218 @@ if "vectorstore_loaded" not in st.session_state:
 if "conversation_history" not in st.session_state:
     st.session_state["conversation_history"] = []
 
+# Try to pregenerate index first, then load existing persistent index on startup
+if not st.session_state.get("vectorstore_loaded", False):
+    # First, try to pregenerate the index
+    if pregenerate_index():
+        st.session_state["vectorstore_loaded"] = True
+        st.success("✅ Pre-generated ChromaDB index from index_source folder")
+    elif load_collection_from_persist():
+        st.session_state["vectorstore_loaded"] = True
+        st.success("✅ Loaded pre-generated ChromaDB index from data folder")
+    else:
+        st.error("❌ No index found. Please ensure the index exists in the data folder.")
+
 # Sidebar navigation
 st.sidebar.title("🧭 Navigation")
-page = st.sidebar.radio(
-    "Go to",
-    ["📤 Upload & Re-Index", "🗑️ Delete Files", "💬 Ask Questions", "💭 Multi-Turn Chat"],
-    index=0,
-)
 
 # -----------------------------------------------------------
-# PAGE: Upload & Re-Index
+# MAIN PAGE: Ask Questions
 # -----------------------------------------------------------
-if page == "📤 Upload & Re-Index":
-    st.header("📤 Upload Files")
-    st.info(
-        "Upload .pdf/.md/.txt files. After uploading, click **Re-index Knowledgebase** to build the vector index."
-    )
+st.header("💬 Ask Questions")
 
-    # Upload widget
-    uploaded = st.file_uploader(
-        "Upload .pdf, .md, .txt", type=["pdf", "md", "txt"], accept_multiple_files=True
-    )
-    if uploaded:
-        for up in uploaded:
-            original = up.name
-            dest_path = os.path.join(DATA_DIR, original)
+# Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
+if COLLECTION is None:
+    load_collection_from_persist()
 
-            try:
-                if original.lower().endswith(".pdf"):
-                    # Teaching note: Convert PDF → .txt so we can index plain text.
-                    pdf_tmp = dest_path + ".tmp"
-                    with open(pdf_tmp, "wb") as f:
-                        f.write(up.read())
-                    text = extract_text_from_pdf(pdf_tmp)
-                    os.remove(pdf_tmp)
+# Quick health check (count chunks)
+if COLLECTION is not None:
+    try:
+        st.info(f"📦 Collection: {COLLECTION_NAME} | 🔢 Chunks: {COLLECTION.count()}")
+    except Exception as e:
+        st.warning(f"Could not read collection count: {e}")
 
-                    if text:
-                        txt_path = os.path.join(DATA_DIR, original[:-4] + ".txt")
-                        with open(txt_path, "w", encoding="utf-8") as f:
-                            f.write(text)
-                        st.success(f"Converted {original} → {os.path.basename(txt_path)}")
-                    else:
-                        st.error(f"Failed to extract text from {original}")
-                else:
-                    # Save .txt / .md directly
-                    with open(dest_path, "wb") as f:
-                        f.write(up.read())
-                    st.success(f"Saved {original}")
-            except Exception as e:
-                st.error(f"Error handling {original}: {e}")
+if not st.session_state.get("vectorstore_loaded", False) and COLLECTION is None:
+    st.warning("⚠️ No index loaded. Please ensure the index exists in the data folder.")
+else:
 
-    # Build the index
-    if st.button("🔄 Re-index Knowledgebase", type="primary"):
-        ok = reindex_knowledgebase()
-        if not ok:
-            st.warning("Indexing failed or no documents found.")
+    # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
+    st.subheader("💬 Ask via LLM")
+    model_id = DEFAULT_LLM_MODEL_ID
+    temperature = DEFAULT_TEMPERATURE
 
-    # File listing
-    existing = [f for f in os.listdir(DATA_DIR) if f.endswith((".txt", ".md"))]
-    if existing:
-        st.subheader("📋 Current Files")
-        for f in existing:
-            st.write("•", f)
-
-
-# -----------------------------------------------------------
-# PAGE: Delete Files
-# -----------------------------------------------------------
-elif page == "🗑️ Delete Files":
-    st.header("🗑️ Delete Files")
-    files = [f for f in os.listdir(DATA_DIR) if f.endswith((".txt", ".md"))]
-    selected = st.multiselect("Select files to delete", files)
-    if st.button("Delete Selected"):
-        deleted = 0
-        for f in selected:
-            try:
-                os.remove(os.path.join(DATA_DIR, f))
-                deleted += 1
-            except Exception as e:
-                st.error(f"Error deleting {f}: {e}")
-        if deleted:
-            st.success(f"Deleted {deleted} file(s). Re-index to refresh the database.")
-
-
-# -----------------------------------------------------------
-# PAGE: Ask Questions
-# -----------------------------------------------------------
-elif page == "💬 Ask Questions":
-    st.header("💬 Ask Questions")
-
-    # Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
-    if COLLECTION is None:
-        load_collection_from_persist()
-
-    # Quick health check (count chunks)
-    if COLLECTION is not None:
-        try:
-            st.info(f"📦 Collection: {COLLECTION_NAME} | 🔢 Chunks: {COLLECTION.count()}")
-        except Exception as e:
-            st.warning(f"Could not read collection count: {e}")
-
-    if not st.session_state.get("vectorstore_loaded", False) and COLLECTION is None:
-        st.warning("⚠️ No index loaded. Go to **Upload & Re-Index** and build the index first.")
-    else:
-        # ---- Retrieval Settings (controls the tool's top-K)
-        st.subheader("🔎 Retrieval Settings")
-        k_value = st.slider("Top-K chunks to retrieve", 1, 10, 3, 1)
-        # Assigning at the top level of the script updates the module variable (no 'global' needed here)
-        K_RETRIEVE = int(k_value)
-
-        # ---- Debug path (bypass LLM) to verify chunks are available
-        st.subheader("🧪 Test Retrieval (No LLM)")
-        debug_q = st.text_input("Test query", value="test")
-        if st.button("Run Test Retrieval"):
-            if COLLECTION is None:
-                st.error("No index loaded.")
-            else:
-                q_vec = titan_embed(debug_q)
-                res = COLLECTION.query(
-                    query_embeddings=[q_vec],
-                    n_results=K_RETRIEVE,
-                    include=["documents", "metadatas", "distances"],  # do not include "ids" here
-                )
-                docs = (res.get("documents") or [[]])[0]
-                metas = (res.get("metadatas") or [[]])[0]
-                dists = (res.get("distances") or [[]])[0]
-
-                if not docs:
-                    st.warning("No chunks returned. Try a different query or re-index.")
-                else:
-                    # Show a quick table preview of retrieved chunks
-                    import pandas as pd
-                    table = pd.DataFrame([
-                        {
-                            "Rank": i + 1,
-                            "Source": (metas[i] or {}).get("source", "unknown"),
-                            "Chunk#": (metas[i] or {}).get("chunk", None),
-                            "Distance": float(dists[i]) if dists and dists[i] is not None else None,
-                            "Preview": (docs[i] or "")[:140].replace("\n", " ") + ("…" if len(docs[i]) > 140 else "")
-                        }
-                        for i in range(len(docs))
-                    ])
-                    st.dataframe(table, use_container_width=True)
-
-                    # Full text expanders
-                    for i, d in enumerate(docs, start=1):
-                        src = (metas[i-1] or {}).get("source", "unknown")
-                        chk = (metas[i-1] or {}).get("chunk", None)
-                        dist = float(dists[i-1]) if dists and dists[i-1] is not None else None
-                        label = f"Result {i} — {src} — chunk {chk}" + (f" — distance {dist:.4f}" if dist is not None else "")
-                        with st.expander(label):
-                            st.write(d)
-
-        # ---- Available Tools Overview
-        st.subheader("🛠️ Available Tools")
-        with st.expander("Click to see available tools and example queries"):
-            st.markdown("""
-            **Order Management Tools:**
-            
-            🔍 **Order Lookup** - Get detailed order information
-            - *Example*: "Show me details for order ORD-001"
-            
-            👤 **Customer Profile** - View customer details and order history  
-            - *Example*: "Show me John Smith's order history"
-            
-            🛍️ **Product Search** - Find products with filters
-            - *Example*: "Show me all Electronics under $100"
-            
-            📊 **Order Status Summary** - Get business metrics and overview
-            - *Example*: "What's our total revenue?"
-            
-            📦 **Inventory Check** - Check stock levels and availability
-            - *Example*: "Which products are low on stock?"
-            
-            📚 **Document Search** - Search through uploaded documents
-            - *Example*: "Find information about return policies"
-            """)
-
-        # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
-        st.subheader("💬 Ask via LLM")
-        model_id = st.text_input("Bedrock model ID", value=DEFAULT_LLM_MODEL_ID, help="e.g., us.amazon.nova-micro-v1:0")
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
-
-        # Build the Bedrock-backed Strands model + agent
-        bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
-        agent = Agent(model=bedrock_model, tools=[
-            tool_retrieve_chunks, 
-            tool_order_lookup, 
-            tool_customer_profile, 
-            tool_product_search, 
-            tool_order_status_summary, 
-            tool_inventory_check
-        ])
-
-        question = st.text_input("Your question")
-        if st.button("Generate Answer") and question:
-            with st.spinner("Retrieving and generating answer..."):
-                system_preamble = (
-                    "You are a helpful assistant for an order management system. You have access to these specialized tools: "
-                    "1) `retrieve_chunks` - search through indexed documents for additional context "
-                    "2) `tool_order_lookup` - get detailed information about a specific order by ID "
-                    "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
-                    "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
-                    "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
-                    "6) `tool_inventory_check` - check stock levels for products or categories "
-                    "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
-                    "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
-                    "If no context is relevant, say so."
-                )
-                response = agent(f"{system_preamble}\n\nUser question: {question}")
-
-                # Show final answer
-                st.markdown("### 💬 Answer")
-                st.write(str(response))
-
-                # Show retrieved chunks (the exact ones the tool pulled)
-                st.markdown("### 📄 Retrieved Chunks (from Chroma)")
-                rows = _get_last_sources()
-                if not rows:
-                    st.info("No chunks returned.")
-                else:
-                    import pandas as pd
-                    table = pd.DataFrame([
-                        {
-                            "Rank": i + 1,
-                            "Source": r["meta"].get("source", "unknown"),
-                            "Chunk#": r["meta"].get("chunk", None),
-                            "Distance": r.get("distance", None),
-                            "Preview": (r["text"] or "")[:140].replace("\n", " ") + ("…" if len(r["text"]) > 140 else "")
-                        }
-                        for i, r in enumerate(rows)
-                    ])
-                    st.dataframe(table, width=True)
-
-                    # Expanders with full text for transparency
-                    for i, r in enumerate(rows, start=1):
-                        src = r["meta"].get("source", "unknown")
-                        chk = r["meta"].get("chunk", None)
-                        dist = r.get("distance", None)
-                        title = f"Source {i} — {src} — chunk {chk}" + (f" — distance {dist:.4f}" if isinstance(dist, (int, float)) else "")
-                        with st.expander(title):
-                            st.write(r["text"] or "")
-
-
-# -----------------------------------------------------------
-# PAGE: Multi-Turn Chat
-# -----------------------------------------------------------
-elif page == "💭 Multi-Turn Chat":
-    # Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
-    if COLLECTION is None:
-        load_collection_from_persist()
-
-    # Build the Bedrock-backed Strands model + agent (use defaults)
-    bedrock_model = BedrockModel(model_id=DEFAULT_LLM_MODEL_ID, temperature=0.2, region=AWS_REGION)
+    # Build the Bedrock-backed Strands model + agent
+    bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
     agent = Agent(model=bedrock_model, tools=[
         tool_retrieve_chunks, 
+        tool_product_search,
         tool_order_lookup, 
         tool_customer_profile, 
-        tool_product_search, 
         tool_order_status_summary, 
         tool_inventory_check
     ])
 
-    # Display conversation history
-    if st.session_state["conversation_history"]:
-        for i, message in enumerate(st.session_state["conversation_history"]):
-            if message["role"] == "user":
-                with st.chat_message("user"):
-                    st.write(message["content"])
+    # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
+    st.subheader("💬 Ask via LLM")
+    model_id = DEFAULT_LLM_MODEL_ID
+    temperature = DEFAULT_TEMPERATURE
+
+    # Build the Bedrock-backed Strands model + agent
+    bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
+    agent = Agent(model=bedrock_model, tools=[
+        tool_retrieve_chunks, 
+        tool_product_search,
+        tool_order_lookup, 
+        tool_customer_profile, 
+        tool_order_status_summary, 
+        tool_inventory_check
+    ])
+
+    question = st.text_input("Your question")
+    if st.button("Generate Answer") and question:
+        with st.spinner("Retrieving and generating answer..."):
+            system_preamble = (
+                "You are a helpful assistant for AIkea, a furniture and order management system. You have access to these specialized tools: "
+                "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
+                "2) `tool_product_search` - search product information in the knowledge base (chairs, desks, mattresses, sofas) "
+                "3) `tool_order_lookup` - get detailed information about a specific order by ID "
+                "4) `tool_customer_profile` - get customer profile and order history by customer_id or email "
+                "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
+                "6) `tool_inventory_check` - check stock levels for products or categories "
+                "Use the appropriate tool(s) based on the user's question. For product-related questions, use tool_product_search. "
+                "For order management questions, use the order tools. Provide helpful answers with proper citations. "
+                "If you use any context, cite it inline as [Source 1], [Source 2], etc. If no context is relevant, say so."
+            )
+            response = agent(f"{system_preamble}\n\nUser question: {question}")
+
+            # Show final answer
+            st.markdown("### 💬 Answer")
+            st.write(str(response))
+
+            # Show retrieved chunks (the exact ones the tool pulled)
+            st.markdown("### 📄 Retrieved Chunks (from Chroma)")
+            rows = _get_last_sources()
+            if not rows:
+                st.info("No chunks returned.")
             else:
-                with st.chat_message("assistant"):
-                    st.write(message["content"])
-    else:
-        # Welcome message
-        with st.chat_message("assistant"):
-            st.write("Hello! I'm your AI assistant for order management and product information. How can I help you today?")
-            st.write("You can ask me about:")
-            st.write("• Products and inventory")
-            st.write("• Order status and tracking")
-            st.write("• Customer information")
-            st.write("• Or anything else you need help with!")
+                import pandas as pd
+                table = pd.DataFrame([
+                    {
+                        "Rank": i + 1,
+                        "Source": r["meta"].get("source", "unknown"),
+                        "Chunk#": r["meta"].get("chunk", None),
+                        "Distance": r.get("distance", None),
+                        "Preview": (r["text"] or "")[:140].replace("\n", " ") + ("…" if len(r["text"]) > 140 else "")
+                    }
+                    for i, r in enumerate(rows)
+                ])
+                st.dataframe(table, width=True)
 
-    # Chat input at the bottom
-    if prompt := st.chat_input("Ask me anything..."):
-        # Add user message to history
-        st.session_state["conversation_history"].append({
-            "role": "user",
-            "content": prompt,
-            "timestamp": time.time()
-        })
-        
-        # Display user message immediately
-        with st.chat_message("user"):
-            st.write(prompt)
-        
-        # Generate response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                # Build conversation context for the agent
-                conversation_context = "Previous conversation:\n"
-                for msg in st.session_state["conversation_history"][:-1]:  # Exclude the current user message
-                    role = "User" if msg["role"] == "user" else "Assistant"
-                    conversation_context += f"{role}: {msg['content']}\n"
-                
-                conversation_context += f"\nCurrent user question: {prompt}"
-                
-                system_preamble = (
-                    "You are a helpful assistant for an order management system. You have access to these specialized tools: "
-                    "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
-                    "2) `tool_order_lookup` - get detailed information about a specific order by ID "
-                    "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
-                    "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
-                    "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
-                    "6) `tool_inventory_check` - check stock levels for products or categories "
-                    "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
-                    "Maintain context from the conversation history and provide relevant follow-up suggestions. "
-                    "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
-                    "If no context is relevant, say so."
-                )
-                
-                response = agent(f"{system_preamble}\n\n{conversation_context}")
-                
-                # Get sources used in this response
-                sources = _get_last_sources()
-                
-                # Add assistant response to history
-                st.session_state["conversation_history"].append({
-                    "role": "assistant",
-                    "content": str(response),
-                    "sources": sources,
-                    "timestamp": time.time()
-                })
-                
-                # Display the response
-                st.write(str(response))
-                
-                # Show sources in a subtle way
-                if sources:
-                    with st.expander("📄 Sources", expanded=False):
-                        for j, source in enumerate(sources, 1):
-                            src = source["meta"].get("source", "unknown")
-                            chk = source["meta"].get("chunk", None)
-                            dist = source.get("distance", None)
-                            title = f"Source {j} — {src}" + (f" chunk {chk}" if chk is not None else "") + (f" (distance: {dist:.4f})" if isinstance(dist, (int, float)) else "")
-                            with st.expander(title, expanded=False):
-                                st.write(source["text"] or "")
+# Display conversation history
+if st.session_state["conversation_history"]:
+    for i, message in enumerate(st.session_state["conversation_history"]):
+        if message["role"] == "user":
+            with st.chat_message("user"):
+                st.write(message["content"])
+        else:
+            with st.chat_message("assistant"):
+                st.write(message["content"])
+else:
+    # Welcome message
+    with st.chat_message("assistant"):
+        st.write("Hello! I'm your AI assistant for order management and product information. How can I help you today?")
+        st.write("You can ask me about:")
+        st.write("• Products and inventory")
+        st.write("• Order status and tracking")
+        st.write("• Customer information")
+        st.write("• Or anything else you need help with!")
 
-    # Simple controls at the bottom
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        if st.button("🗑️ Clear", help="Clear conversation"):
-            st.session_state["conversation_history"] = []
-            st.rerun()
-    with col2:
-        if st.button("📋 Export", help="Download chat"):
-            if st.session_state["conversation_history"]:
-                chat_text = "Conversation Export\n" + "="*50 + "\n\n"
-                for message in st.session_state["conversation_history"]:
-                    role = "User" if message["role"] == "user" else "Assistant"
-                    chat_text += f"{role}: {message['content']}\n\n"
-                
-                st.download_button(
-                    label="Download",
-                    data=chat_text,
-                    file_name=f"conversation_{int(time.time())}.txt",
-                    mime="text/plain"
-                )
-    with col3:
-        if st.button("🔄 New Topic", help="Start fresh"):
-            st.session_state["conversation_history"] = []
-            st.rerun()
+# Chat input at the bottom
+if prompt := st.chat_input("Ask me anything..."):
+    # Add user message to history
+    st.session_state["conversation_history"].append({
+        "role": "user",
+        "content": prompt,
+        "timestamp": time.time()
+    })
+    
+    # Display user message immediately
+    with st.chat_message("user"):
+        st.write(prompt)
+    
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            # Build conversation context for the agent
+            conversation_context = "Previous conversation:\n"
+            for msg in st.session_state["conversation_history"][:-1]:  # Exclude the current user message
+                role = "User" if msg["role"] == "user" else "Assistant"
+                conversation_context += f"{role}: {msg['content']}\n"
+            
+            conversation_context += f"\nCurrent user question: {prompt}"
+            
+            system_preamble = (
+                "You are a helpful assistant for an order management system. You have access to these specialized tools: "
+                "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
+                "2) `tool_order_lookup` - get detailed information about a specific order by ID "
+                "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
+                "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
+                "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
+                "6) `tool_inventory_check` - check stock levels for products or categories "
+                "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
+                "Maintain context from the conversation history and provide relevant follow-up suggestions. "
+                "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
+                "If no context is relevant, say so."
+            )
+            
+            response = agent(f"{system_preamble}\n\n{conversation_context}")
+            
+            # Get sources used in this response
+            sources = _get_last_sources()
+            
+            # Add assistant response to history
+            st.session_state["conversation_history"].append({
+                "role": "assistant",
+                "content": str(response),
+                "sources": sources,
+                "timestamp": time.time()
+            })
+            
+            # Display the response
+            st.write(str(response))
+            
+            # Show sources in a subtle way
+            if sources:
+                with st.expander("📄 Sources", expanded=False):
+                    for j, source in enumerate(sources, 1):
+                        src = source["meta"].get("source", "unknown")
+                        chk = source["meta"].get("chunk", None)
+                        dist = source.get("distance", None)
+                        title = f"Source {j} — {src}" + (f" chunk {chk}" if chk is not None else "") + (f" (distance: {dist:.4f})" if isinstance(dist, (int, float)) else "")
+                        with st.expander(title, expanded=False):
+                            st.write(source["text"] or "")
+
+# Simple controls at the bottom
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    if st.button("🗑️ Clear", help="Clear conversation"):
+        st.session_state["conversation_history"] = []
+        st.rerun()
+with col2:
+    if st.button("📋 Export", help="Download chat"):
+        if st.session_state["conversation_history"]:
+            chat_text = "Conversation Export\n" + "="*50 + "\n\n"
+            for message in st.session_state["conversation_history"]:
+                role = "User" if message["role"] == "user" else "Assistant"
+                chat_text += f"{role}: {message['content']}\n\n"
+            
+            st.download_button(
+                label="Download",
+                data=chat_text,
+                file_name=f"conversation_{int(time.time())}.txt",
+                mime="text/plain"
+            )
+with col3:
+    if st.button("🔄 New Topic", help="Start fresh"):
+        st.session_state["conversation_history"] = []
+        st.rerun()

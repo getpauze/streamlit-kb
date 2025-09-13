@@ -8,6 +8,8 @@
 *.pem
 credentials.json
 
+chroma_db/
+
 # --- PYTHON BASICS ---
 __pycache__/
 *.pyc
