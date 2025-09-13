@@ -741,15 +741,19 @@ def tool_inventory_check(product_id: str = None, category: str = None, low_stock
 # ===========================================================
 st.title("🧠 Knowledgebase (Strands + Bedrock) — No LangChain")
 
-# Track whether we’ve created an index during this session
+# Track whether we've created an index during this session
 if "vectorstore_loaded" not in st.session_state:
     st.session_state["vectorstore_loaded"] = False
+
+# Initialize conversation history
+if "conversation_history" not in st.session_state:
+    st.session_state["conversation_history"] = []
 
 # Sidebar navigation
 st.sidebar.title("🧭 Navigation")
 page = st.sidebar.radio(
     "Go to",
-    ["📤 Upload & Re-Index", "🗑️ Delete Files", "💬 Ask Questions"],
+    ["📤 Upload & Re-Index", "🗑️ Delete Files", "💬 Ask Questions", "💭 Multi-Turn Chat"],
     index=0,
 )
 
@@ -986,3 +990,132 @@ elif page == "💬 Ask Questions":
                         title = f"Source {i} — {src} — chunk {chk}" + (f" — distance {dist:.4f}" if isinstance(dist, (int, float)) else "")
                         with st.expander(title):
                             st.write(r["text"] or "")
+
+
+# -----------------------------------------------------------
+# PAGE: Multi-Turn Chat
+# -----------------------------------------------------------
+elif page == "💭 Multi-Turn Chat":
+    # Streamlit reruns can drop globals — rehydrate Chroma from disk if needed
+    if COLLECTION is None:
+        load_collection_from_persist()
+
+    # Build the Bedrock-backed Strands model + agent (use defaults)
+    bedrock_model = BedrockModel(model_id=DEFAULT_LLM_MODEL_ID, temperature=0.2, region=AWS_REGION)
+    agent = Agent(model=bedrock_model, tools=[
+        tool_retrieve_chunks, 
+        tool_order_lookup, 
+        tool_customer_profile, 
+        tool_product_search, 
+        tool_order_status_summary, 
+        tool_inventory_check
+    ])
+
+    # Display conversation history
+    if st.session_state["conversation_history"]:
+        for i, message in enumerate(st.session_state["conversation_history"]):
+            if message["role"] == "user":
+                with st.chat_message("user"):
+                    st.write(message["content"])
+            else:
+                with st.chat_message("assistant"):
+                    st.write(message["content"])
+    else:
+        # Welcome message
+        with st.chat_message("assistant"):
+            st.write("Hello! I'm your AI assistant for order management and product information. How can I help you today?")
+            st.write("You can ask me about:")
+            st.write("• Products and inventory")
+            st.write("• Order status and tracking")
+            st.write("• Customer information")
+            st.write("• Or anything else you need help with!")
+
+    # Chat input at the bottom
+    if prompt := st.chat_input("Ask me anything..."):
+        # Add user message to history
+        st.session_state["conversation_history"].append({
+            "role": "user",
+            "content": prompt,
+            "timestamp": time.time()
+        })
+        
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.write(prompt)
+        
+        # Generate response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # Build conversation context for the agent
+                conversation_context = "Previous conversation:\n"
+                for msg in st.session_state["conversation_history"][:-1]:  # Exclude the current user message
+                    role = "User" if msg["role"] == "user" else "Assistant"
+                    conversation_context += f"{role}: {msg['content']}\n"
+                
+                conversation_context += f"\nCurrent user question: {prompt}"
+                
+                system_preamble = (
+                    "You are a helpful assistant for an order management system. You have access to these specialized tools: "
+                    "1) `tool_retrieve_chunks` - search through indexed documents for additional context "
+                    "2) `tool_order_lookup` - get detailed information about a specific order by ID "
+                    "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
+                    "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
+                    "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
+                    "6) `tool_inventory_check` - check stock levels for products or categories "
+                    "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
+                    "Maintain context from the conversation history and provide relevant follow-up suggestions. "
+                    "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
+                    "If no context is relevant, say so."
+                )
+                
+                response = agent(f"{system_preamble}\n\n{conversation_context}")
+                
+                # Get sources used in this response
+                sources = _get_last_sources()
+                
+                # Add assistant response to history
+                st.session_state["conversation_history"].append({
+                    "role": "assistant",
+                    "content": str(response),
+                    "sources": sources,
+                    "timestamp": time.time()
+                })
+                
+                # Display the response
+                st.write(str(response))
+                
+                # Show sources in a subtle way
+                if sources:
+                    with st.expander("📄 Sources", expanded=False):
+                        for j, source in enumerate(sources, 1):
+                            src = source["meta"].get("source", "unknown")
+                            chk = source["meta"].get("chunk", None)
+                            dist = source.get("distance", None)
+                            title = f"Source {j} — {src}" + (f" chunk {chk}" if chk is not None else "") + (f" (distance: {dist:.4f})" if isinstance(dist, (int, float)) else "")
+                            with st.expander(title, expanded=False):
+                                st.write(source["text"] or "")
+
+    # Simple controls at the bottom
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        if st.button("🗑️ Clear", help="Clear conversation"):
+            st.session_state["conversation_history"] = []
+            st.rerun()
+    with col2:
+        if st.button("📋 Export", help="Download chat"):
+            if st.session_state["conversation_history"]:
+                chat_text = "Conversation Export\n" + "="*50 + "\n\n"
+                for message in st.session_state["conversation_history"]:
+                    role = "User" if message["role"] == "user" else "Assistant"
+                    chat_text += f"{role}: {message['content']}\n\n"
+                
+                st.download_button(
+                    label="Download",
+                    data=chat_text,
+                    file_name=f"conversation_{int(time.time())}.txt",
+                    mime="text/plain"
+                )
+    with col3:
+        if st.button("🔄 New Topic", help="Start fresh"):
+            st.session_state["conversation_history"] = []
+            st.rerun()
