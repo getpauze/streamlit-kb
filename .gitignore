@@ -8,18 +8,6 @@
 *.pem
 credentials.json
 
-# --- APP DATA ---
-# Uploaded documents
-data/
-
-# Vector database (though we use temp dirs)
-chroma_db/
-chromadb/
-
-# Temporary files
-temp_*/
-tmp_*/
-
 # --- PYTHON BASICS ---
 __pycache__/
 *.pyc

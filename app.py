@@ -48,11 +48,13 @@ import json
 import time
 import tempfile
 import threading
+import csv
 from typing import List, Dict, Any
 
 import streamlit as st
 from dotenv import load_dotenv
 import PyPDF2
+import pandas as pd
 
 import boto3
 from botocore.config import Config
@@ -329,7 +331,7 @@ def reindex_knowledgebase() -> bool:
 # 🛠️ Retrieval Tool (Strands) — NO Streamlit calls inside!
 # ===========================================================
 @tool
-def retrieve_chunks(question: str) -> str:
+def tool_retrieve_chunks(question: str) -> str:
     """
     Retrieval tool for the Strands Agent.
 
@@ -384,6 +386,354 @@ def retrieve_chunks(question: str) -> str:
         dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "NA"
         out_lines.append(f"[Source {rank} — {src} — dist:{dist_str}]\n{item['text']}")
     return "\n\n".join(out_lines) if out_lines else "[No matching context]"
+
+
+# ===========================================================
+# 🛠️ Order Management Tools
+# ===========================================================
+
+@tool
+def tool_order_lookup(order_id: str) -> str:
+    """
+    Look up a specific order by its ID and return detailed information.
+    
+    Args:
+        order_id: The order ID to look up (e.g., "ORD-001")
+    
+    Returns:
+        Detailed order information including customer and product details
+    """
+    try:
+        # Load orders data
+        orders_path = os.path.join(DATA_DIR, "orders.csv")
+        customers_path = os.path.join(DATA_DIR, "customers.csv")
+        products_path = os.path.join(DATA_DIR, "products.csv")
+        
+        if not all(os.path.exists(p) for p in [orders_path, customers_path, products_path]):
+            return "[Error] Required CSV files not found"
+        
+        orders_df = pd.read_csv(orders_path)
+        customers_df = pd.read_csv(customers_path)
+        products_df = pd.read_csv(products_path)
+        
+        # Find the order
+        order = orders_df[orders_df['order_id'] == order_id]
+        if order.empty:
+            available_orders = orders_df['order_id'].tolist()[:5]  # Show first 5 orders
+            return f"[Error] Order '{order_id}' not found. Available orders: {', '.join(available_orders)}"
+        
+        order_row = order.iloc[0]
+        
+        # Get customer details
+        customer = customers_df[customers_df['customer_id'] == order_row['customer_id']]
+        customer_info = customer.iloc[0] if not customer.empty else None
+        
+        # Get product details
+        product = products_df[products_df['product_id'] == order_row['product_id']]
+        product_info = product.iloc[0] if not product.empty else None
+        
+        # Build response
+        output_lines = []
+        output_lines.append(f"📦 Order Details: {order_id}")
+        output_lines.append("=" * 50)
+        output_lines.append(f"Order ID: {order_row['order_id']}")
+        output_lines.append(f"Order Date: {order_row['order_date']}")
+        output_lines.append(f"Status: {order_row['status']}")
+        output_lines.append(f"Quantity: {order_row['quantity']}")
+        output_lines.append(f"Unit Price: ${order_row['unit_price']}")
+        output_lines.append(f"Total Amount: ${order_row['total_amount']}")
+        output_lines.append(f"Shipping Address: {order_row['shipping_address']}")
+        output_lines.append("")
+        
+        if customer_info is not None:
+            output_lines.append("👤 Customer Information:")
+            output_lines.append(f"  Name: {customer_info['name']}")
+            output_lines.append(f"  Email: {customer_info['email']}")
+            output_lines.append(f"  Phone: {customer_info['phone']}")
+            output_lines.append(f"  Status: {customer_info['status']}")
+            output_lines.append("")
+        
+        if product_info is not None:
+            output_lines.append("🛍️ Product Information:")
+            output_lines.append(f"  Name: {product_info['name']}")
+            output_lines.append(f"  Category: {product_info['category']}")
+            output_lines.append(f"  Description: {product_info['description']}")
+            output_lines.append(f"  Stock: {product_info['stock_quantity']} units")
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to look up order: {str(e)}"
+
+
+@tool
+def tool_customer_profile(customer_id: str = None, email: str = None) -> str:
+    """
+    Get customer profile and order history.
+    
+    Args:
+        customer_id: Customer ID to look up
+        email: Customer email to look up (alternative to customer_id)
+    
+    Returns:
+        Customer profile and order history
+    """
+    try:
+        orders_path = os.path.join(DATA_DIR, "orders.csv")
+        customers_path = os.path.join(DATA_DIR, "customers.csv")
+        products_path = os.path.join(DATA_DIR, "products.csv")
+        
+        if not all(os.path.exists(p) for p in [orders_path, customers_path, products_path]):
+            return "[Error] Required CSV files not found"
+        
+        customers_df = pd.read_csv(customers_path)
+        orders_df = pd.read_csv(orders_path)
+        products_df = pd.read_csv(products_path)
+        
+        # Find customer
+        if customer_id:
+            customer = customers_df[customers_df['customer_id'] == customer_id]
+        elif email:
+            customer = customers_df[customers_df['email'] == email]
+        else:
+            return "[Error] Please provide either customer_id or email"
+        
+        if customer.empty:
+            return f"[Error] Customer not found"
+        
+        customer_info = customer.iloc[0]
+        
+        # Get customer's orders
+        customer_orders = orders_df[orders_df['customer_id'] == customer_info['customer_id']]
+        
+        # Build response
+        output_lines = []
+        output_lines.append(f"👤 Customer Profile: {customer_info['name']}")
+        output_lines.append("=" * 50)
+        output_lines.append(f"Customer ID: {customer_info['customer_id']}")
+        output_lines.append(f"Name: {customer_info['name']}")
+        output_lines.append(f"Email: {customer_info['email']}")
+        output_lines.append(f"Phone: {customer_info['phone']}")
+        output_lines.append(f"Registration Date: {customer_info['registration_date']}")
+        output_lines.append(f"Status: {customer_info['status']}")
+        output_lines.append(f"Total Orders: {customer_info['total_orders']}")
+        output_lines.append("")
+        
+        if not customer_orders.empty:
+            output_lines.append("📦 Order History:")
+            total_spent = customer_orders['total_amount'].sum()
+            output_lines.append(f"Total Spent: ${total_spent:.2f}")
+            output_lines.append("")
+            
+            for _, order in customer_orders.iterrows():
+                product = products_df[products_df['product_id'] == order['product_id']]
+                product_name = product.iloc[0]['name'] if not product.empty else "Unknown Product"
+                output_lines.append(f"  • {order['order_id']} - {product_name} (${order['total_amount']}) - {order['status']} - {order['order_date']}")
+        else:
+            output_lines.append("📦 No orders found for this customer")
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to get customer profile: {str(e)}"
+
+
+@tool
+def tool_product_search(category: str = None, min_price: float = None, max_price: float = None, 
+                       in_stock: bool = True, search_term: str = None) -> str:
+    """
+    Search for products with various filters.
+    
+    Args:
+        category: Product category to filter by
+        min_price: Minimum price filter
+        max_price: Maximum price filter
+        in_stock: Only show products in stock (default: True)
+        search_term: Search term for product name/description
+    
+    Returns:
+        Filtered product list
+    """
+    try:
+        products_path = os.path.join(DATA_DIR, "products.csv")
+        
+        if not os.path.exists(products_path):
+            return "[Error] Products CSV file not found"
+        
+        products_df = pd.read_csv(products_path)
+        
+        # Apply filters
+        filtered_df = products_df.copy()
+        
+        if category:
+            filtered_df = filtered_df[filtered_df['category'].str.contains(category, case=False, na=False)]
+        
+        if min_price is not None:
+            filtered_df = filtered_df[filtered_df['price'] >= min_price]
+        
+        if max_price is not None:
+            filtered_df = filtered_df[filtered_df['price'] <= max_price]
+        
+        if in_stock:
+            filtered_df = filtered_df[filtered_df['stock_quantity'] > 0]
+        
+        if search_term:
+            mask = filtered_df['name'].str.contains(search_term, case=False, na=False) | \
+                   filtered_df['description'].str.contains(search_term, case=False, na=False)
+            filtered_df = filtered_df[mask]
+        
+        # Build response
+        output_lines = []
+        output_lines.append(f"🛍️ Product Search Results ({len(filtered_df)} products found)")
+        output_lines.append("=" * 60)
+        
+        if filtered_df.empty:
+            output_lines.append("No products found matching your criteria")
+        else:
+            for _, product in filtered_df.iterrows():
+                output_lines.append(f"Product ID: {product['product_id']}")
+                output_lines.append(f"Name: {product['name']}")
+                output_lines.append(f"Category: {product['category']}")
+                output_lines.append(f"Price: ${product['price']}")
+                output_lines.append(f"Stock: {product['stock_quantity']} units")
+                output_lines.append(f"Description: {product['description']}")
+                output_lines.append("-" * 40)
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to search products: {str(e)}"
+
+
+@tool
+def tool_order_status_summary() -> str:
+    """
+    Get a summary of all order statuses and key metrics.
+    
+    Returns:
+        Order status summary and metrics
+    """
+    try:
+        orders_path = os.path.join(DATA_DIR, "orders.csv")
+        
+        if not os.path.exists(orders_path):
+            return "[Error] Orders CSV file not found"
+        
+        orders_df = pd.read_csv(orders_path)
+        
+        # Ensure status column is treated as string
+        orders_df['status'] = orders_df['status'].astype(str)
+        
+        # Calculate metrics
+        total_orders = len(orders_df)
+        total_revenue = orders_df['total_amount'].sum()
+        avg_order_value = orders_df['total_amount'].mean()
+        
+        # Status breakdown
+        status_counts = orders_df['status'].value_counts()
+        
+        # Recent orders (last 5)
+        recent_orders = orders_df.sort_values('order_date', ascending=False).head(5)
+        
+        # Build response
+        output_lines = []
+        output_lines.append("📊 Order Status Summary")
+        output_lines.append("=" * 40)
+        output_lines.append(f"Total Orders: {total_orders}")
+        output_lines.append(f"Total Revenue: ${total_revenue:.2f}")
+        output_lines.append(f"Average Order Value: ${avg_order_value:.2f}")
+        output_lines.append("")
+        
+        output_lines.append("📈 Order Status Breakdown:")
+        for status, count in status_counts.items():
+            percentage = (count / total_orders) * 100
+            output_lines.append(f"  {status}: {count} orders ({percentage:.1f}%)")
+        
+        output_lines.append("")
+        output_lines.append("🕒 Recent Orders:")
+        for _, order in recent_orders.iterrows():
+            output_lines.append(f"  {order['order_id']} - ${order['total_amount']} - {order['status']} - {order['order_date']}")
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to get order status summary: {str(e)}"
+
+
+@tool
+def tool_inventory_check(product_id: str = None, category: str = None, low_stock_threshold: int = 10) -> str:
+    """
+    Check inventory levels for products.
+    
+    Args:
+        product_id: Specific product ID to check
+        category: Check all products in a category
+        low_stock_threshold: Threshold for low stock warning (default: 10)
+    
+    Returns:
+        Inventory status information
+    """
+    try:
+        products_path = os.path.join(DATA_DIR, "products.csv")
+        
+        if not os.path.exists(products_path):
+            return "[Error] Products CSV file not found"
+        
+        products_df = pd.read_csv(products_path)
+        
+        # Apply filters
+        if product_id:
+            filtered_df = products_df[products_df['product_id'] == product_id]
+            if filtered_df.empty:
+                return f"[Error] Product '{product_id}' not found"
+        elif category:
+            filtered_df = products_df[products_df['category'].str.contains(category, case=False, na=False)]
+        else:
+            filtered_df = products_df
+        
+        # Check stock levels
+        low_stock = filtered_df[filtered_df['stock_quantity'] <= low_stock_threshold]
+        out_of_stock = filtered_df[filtered_df['stock_quantity'] == 0]
+        in_stock = filtered_df[filtered_df['stock_quantity'] > low_stock_threshold]
+        
+        # Build response
+        output_lines = []
+        output_lines.append("📦 Inventory Status")
+        output_lines.append("=" * 30)
+        
+        if product_id:
+            product = filtered_df.iloc[0]
+            output_lines.append(f"Product: {product['name']}")
+            output_lines.append(f"Current Stock: {product['stock_quantity']} units")
+            if product['stock_quantity'] == 0:
+                output_lines.append("⚠️ OUT OF STOCK")
+            elif product['stock_quantity'] <= low_stock_threshold:
+                output_lines.append("⚠️ LOW STOCK")
+            else:
+                output_lines.append("✅ In Stock")
+        else:
+            output_lines.append(f"Total Products: {len(filtered_df)}")
+            output_lines.append(f"In Stock: {len(in_stock)}")
+            output_lines.append(f"Low Stock: {len(low_stock)}")
+            output_lines.append(f"Out of Stock: {len(out_of_stock)}")
+            output_lines.append("")
+            
+            if not out_of_stock.empty:
+                output_lines.append("🚫 Out of Stock:")
+                for _, product in out_of_stock.iterrows():
+                    output_lines.append(f"  • {product['product_id']} - {product['name']}")
+                output_lines.append("")
+            
+            if not low_stock.empty:
+                output_lines.append("⚠️ Low Stock:")
+                for _, product in low_stock.iterrows():
+                    output_lines.append(f"  • {product['product_id']} - {product['name']} ({product['stock_quantity']} units)")
+        
+        return "\n".join(output_lines)
+        
+    except Exception as e:
+        return f"[Error] Failed to check inventory: {str(e)}"
+        
 
 
 # ===========================================================
@@ -547,6 +897,31 @@ elif page == "💬 Ask Questions":
                         with st.expander(label):
                             st.write(d)
 
+        # ---- Available Tools Overview
+        st.subheader("🛠️ Available Tools")
+        with st.expander("Click to see available tools and example queries"):
+            st.markdown("""
+            **Order Management Tools:**
+            
+            🔍 **Order Lookup** - Get detailed order information
+            - *Example*: "Show me details for order ORD-001"
+            
+            👤 **Customer Profile** - View customer details and order history  
+            - *Example*: "Show me John Smith's order history"
+            
+            🛍️ **Product Search** - Find products with filters
+            - *Example*: "Show me all Electronics under $100"
+            
+            📊 **Order Status Summary** - Get business metrics and overview
+            - *Example*: "What's our total revenue?"
+            
+            📦 **Inventory Check** - Check stock levels and availability
+            - *Example*: "Which products are low on stock?"
+            
+            📚 **Document Search** - Search through uploaded documents
+            - *Example*: "Find information about return policies"
+            """)
+
         # ---- Ask via LLM (Strands Agent calls the retrieval tool first)
         st.subheader("💬 Ask via LLM")
         model_id = st.text_input("Bedrock model ID", value=DEFAULT_LLM_MODEL_ID, help="e.g., us.amazon.nova-micro-v1:0")
@@ -554,14 +929,27 @@ elif page == "💬 Ask Questions":
 
         # Build the Bedrock-backed Strands model + agent
         bedrock_model = BedrockModel(model_id=model_id, temperature=temperature, region=AWS_REGION)
-        agent = Agent(model=bedrock_model, tools=[retrieve_chunks])
+        agent = Agent(model=bedrock_model, tools=[
+            tool_retrieve_chunks, 
+            tool_order_lookup, 
+            tool_customer_profile, 
+            tool_product_search, 
+            tool_order_status_summary, 
+            tool_inventory_check
+        ])
 
         question = st.text_input("Your question")
         if st.button("Generate Answer") and question:
             with st.spinner("Retrieving and generating answer..."):
                 system_preamble = (
-                    "You are a helpful assistant that answers using local documents. "
-                    "First call the `retrieve_chunks` tool with the user's question, then answer concisely. "
+                    "You are a helpful assistant for an order management system. You have access to these specialized tools: "
+                    "1) `retrieve_chunks` - search through indexed documents for additional context "
+                    "2) `tool_order_lookup` - get detailed information about a specific order by ID "
+                    "3) `tool_customer_profile` - get customer profile and order history by customer_id or email "
+                    "4) `tool_product_search` - search products by category, price range, stock status, or search terms "
+                    "5) `tool_order_status_summary` - get overview of all orders, revenue, and status breakdown "
+                    "6) `tool_inventory_check` - check stock levels for products or categories "
+                    "Use the appropriate tool(s) based on the user's question, then provide a helpful answer. "
                     "If you use any context, cite it inline as [Source 1], [Source 2], etc. "
                     "If no context is relevant, say so."
                 )
@@ -588,7 +976,7 @@ elif page == "💬 Ask Questions":
                         }
                         for i, r in enumerate(rows)
                     ])
-                    st.dataframe(table, use_container_width=True)
+                    st.dataframe(table, width=True)
 
                     # Expanders with full text for transparency
                     for i, r in enumerate(rows, start=1):
